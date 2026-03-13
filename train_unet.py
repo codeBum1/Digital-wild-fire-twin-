@@ -149,8 +149,10 @@ EVAL_NORMALIZE_PER_SAMPLE = _env("EVAL_NORMALIZE_PER_SAMPLE", "1", int)
 RUN_TAG_ENV = _env("RUN_TAG",             "")
 SEED = _env("SEED",                  "42",   int)
 WANDB_PROJECT = _env("WANDB_PROJECT",         "")
-TEST_FRAC = _env("TEST_FRAC",             "0.20", float)  # fraction held out for test
+TEST_FRAC = _env("TEST_FRAC",             "0.20", float)  # fraction held out for test (used when KFOLD_K<=1)
 SPLIT_SEED = _env("SPLIT_SEED",            "0",    int)   # separate seed for reproducible split
+KFOLD_K    = _env("KFOLD_K",              "0",    int)   # >1 enables k-fold CV
+KFOLD_FOLD = _env("KFOLD_FOLD",           "0",    int)   # which fold is the test fold (0-indexed)
 
 # Output sub-dirs  (created at runtime on rank-0)
 VIZ_DIR = os.path.join(OUT_ROOT, "eval_viz")
@@ -1499,30 +1501,43 @@ def main():
         for d in ALL_OUTPUT_DIRS:
             os.makedirs(d, exist_ok=True)
 
-    # ── Train / test split ────────────────────────────────────
+    # ── Train / test split (random holdout or k-fold CV) ─────
     _full_ds = WrfVitShardDataset(SHARDS_DIR)
     n_total = len(_full_ds)
-    n_test = max(1, round(n_total * TEST_FRAC))
-    n_train = n_total - n_test
-    rng_split = np.random.default_rng(SPLIT_SEED)
     all_idx = list(range(n_total))
-    test_idx = sorted(rng_split.choice(all_idx, size=n_test, replace=False).tolist())
-    train_idx = sorted(set(all_idx) - set(test_idx))
+    rng_split = np.random.default_rng(SPLIT_SEED)
 
-    ds       = WrfVitShardDataset(SHARDS_DIR, indices=train_idx, augment=True)   # training set
-    test_ds  = WrfVitShardDataset(SHARDS_DIR, indices=test_idx,  augment=False)  # held-out test set
+    if KFOLD_K > 1:
+        # K-fold: shuffle once with SPLIT_SEED, divide into K folds
+        shuffled = all_idx.copy()
+        rng_split.shuffle(shuffled)
+        folds = [shuffled[i::KFOLD_K] for i in range(KFOLD_K)]
+        test_idx  = sorted(folds[KFOLD_FOLD])
+        train_idx = sorted(sum([folds[i] for i in range(KFOLD_K) if i != KFOLD_FOLD], []))
+        split_meta = {"mode": "kfold", "k": KFOLD_K, "fold": KFOLD_FOLD,
+                      "split_seed": SPLIT_SEED, "shards_dir": SHARDS_DIR}
+        split_label = f"k={KFOLD_K}  fold={KFOLD_FOLD}/{KFOLD_K-1}"
+    else:
+        # Random holdout
+        n_test = max(1, round(n_total * TEST_FRAC))
+        test_idx  = sorted(rng_split.choice(all_idx, size=n_test, replace=False).tolist())
+        train_idx = sorted(set(all_idx) - set(test_idx))
+        split_meta = {"mode": "holdout", "test_frac": TEST_FRAC,
+                      "split_seed": SPLIT_SEED, "shards_dir": SHARDS_DIR}
+        split_label = f"TEST_FRAC={TEST_FRAC}  SPLIT_SEED={SPLIT_SEED}"
+
+    n_train, n_test = len(train_idx), len(test_idx)
+    ds      = WrfVitShardDataset(SHARDS_DIR, indices=train_idx, augment=True)   # training set
+    test_ds = WrfVitShardDataset(SHARDS_DIR, indices=test_idx,  augment=False)  # held-out test set
 
     if main_proc:
-        print(f"Dataset: {n_total} total  |  train={n_train}  test={n_test}  "
-              f"(TEST_FRAC={TEST_FRAC}, SPLIT_SEED={SPLIT_SEED})")
+        print(f"Dataset: {n_total} total  |  train={n_train}  test={n_test}  ({split_label})")
         print(f"Test indices: {test_idx}")
         split_path = os.path.join(OUT_ROOT, "train_test_split.json")
         os.makedirs(OUT_ROOT, exist_ok=True)
         import json
         with open(split_path, "w") as f:
-            json.dump({"train": train_idx, "test": test_idx,
-                       "test_frac": TEST_FRAC, "split_seed": SPLIT_SEED,
-                       "shards_dir": SHARDS_DIR}, f, indent=2)
+            json.dump({"train": train_idx, "test": test_idx, **split_meta}, f, indent=2)
         print(f"Split saved to {split_path}")
 
     X0, Y0 = ds[0]
