@@ -1,0 +1,64 @@
+# Model checkpoints
+*.pt
+*.pth
+
+# Raw WRF data
+*.nc
+*.h5
+*.npz
+*.zarr
+
+# Dataset shards
+vit_dataset_*/
+vit_sample_*.npz
+
+# SLURM logs
+*.out
+*.err
+*.log
+
+# Training output directories
+unet_*_outputs/
+unet_*_viz/
+unet_*_gifs/
+unet_*_plots/
+unet_*_sweeps/
+unet_*_rollouts/
+outputs/
+old_runs/
+runs/
+
+# Visualizations
+*.gif
+*.png
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+
+# Backup / scratch files
+*.bak
+*.bak_*
+*.save
+*.save.*
+
+# Basemaps cache
+basemaps/
+
+# Converter scratch
+converters/logs/
+converters/out.nc
+converters/out.nc.done
+converters/sandbox_wrfout_from_h5.nc
+
+# SSH
+ssh/
+ssh
+
+# Claude Code local settings
+.claude/
+
+# NFS temp files
+.nfs*
