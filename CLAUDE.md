@@ -9,6 +9,7 @@ Wildfire spread forecasting using a UNet model trained on WRF-SFIRE (Weather Res
 | `train_unet.py` | Main training script (UNet v2 with CBAM, SE blocks, Lovász loss, DDP) |
 | `wrf_vit_dataset.py` | PyTorch Dataset that loads NPZ shards (X: inputs, Y: fire masks) |
 | `build_vit_dataset.py` | Builds NPZ shard datasets from WRF NetCDF/HDF5 wrfout files |
+| `build_pnw_dataset.py` | Multi-sim dataset builder for real WRF-SFIRE runs (supports `VIT_DOMAIN`, `VIT_FIRE_VARS` env vars) |
 | `rollout_unet_mask.py` | Autoregressive rollout evaluation |
 | `viz_*.py` | Visualization scripts (GIFs, overlays, predictions) |
 | `converters/h5_to_nc.py` | Converts HDF5 wrfout files to NetCDF |
@@ -18,6 +19,12 @@ Wildfire spread forecasting using a UNet model trained on WRF-SFIRE (Weather Res
 - File lists: `wrfout_files.txt`, `wrfout_files_with_fire.txt`, `wrfout_files_abs.txt`
 - Shard datasets (NPZ): `vit_dataset_fireonly_tplus*/shards/`
   - Key datasets: `tplus1_fireX_maxpool_paired`, `tplus3_fireX_maxpool_paired`, `tplus6_fireX_maxpool_paired`
+- **Evans Canyon fire** (2020-08-31 → 2020-09-03, real WRF-SFIRE, d03 15-min outputs):
+  - Raw: `/scratch/wdt/sfire/new_wrfxpy/wrfxpy/wksp/testing-NAM218_evans_canyon/wrf/`
+  - Shards: `vit_dataset_evans_tplus1/shards/` — **334 shards**, X=(9,99,99), Y=(2,99,99), 0 errors
+  - Built with: `PNW_RAW_DIR=.../testing-NAM218_evans_canyon VIT_DOMAIN=d03 VIT_FIRE_VARS="FIRE_AREA,ROS" PNW_OUT_DIR=vit_dataset_evans_tplus1 python build_pnw_dataset.py`
+  - Note: `FLAME_LENGTH` not present in these outputs — use `VIT_FIRE_VARS=FIRE_AREA,ROS`
+- **PNW sims** (`pnw_sfire_raw/`, 111 sims 2015-2023): **all zero fire** — WRF-SFIRE ignition config issue in the pipeline, not a data builder issue
 
 ## Environment & Compute
 - Python venv: `~/venvs/wdt_ml/bin/activate`
@@ -58,11 +65,13 @@ Post-processing layer on top of existing fire perimeter output. No model changes
 - Output: per-cell human danger score overlaid on fire spread forecast
 - Reuses `unet_l40s_best.pt` output directly
 
-### 2. Smoke / Air Quality Prediction (~3-4 weeks) — do after danger rating
-Extend model to predict PM2.5 and smoke dispersion.
-- Add **FCCS (Fuel Characteristic Classification System)** fuel data as an additional input channel to `wrf_vit_dataset.py`
-- New output head predicting PM2.5 concentration alongside fire perimeter
-- Requires WRF-Chem or HYSPLIT coupling for smoke transport ground truth
+### 2. Smoke / Air Quality Prediction — infrastructure done; ground truth pending
+- **[done]** `FUEL_FRAC` input channel: set `VIT_INCLUDE_FUEL_FRAC=1` when running `build_vit_dataset.py`
+- **[done]** PM2.5 proxy Y channel: set `VIT_INCLUDE_PM25_PROXY=1`; physics surrogate from `FIRE_AREA × FUEL_FRAC_BURNT` + Gaussian wind dispersion
+- **[done]** `SMOKE_W` env var in `train_unet.py` scales Huber regression loss on auxiliary channels
+- **[done]** `smoke_viz.py` visualises fire + ROS + Flame Length + PM2.5 channels side-by-side
+- **[next]** Rebuild shards with fuel+PM25 flags and retrain with `SMOKE_W=0.1`
+- **[future]** Replace PM2.5 proxy with real WRF-Chem or HYSPLIT output when available
 
 ## Common Workflows
 ```bash
