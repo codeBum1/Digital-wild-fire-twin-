@@ -68,6 +68,8 @@ train_unet.py           # Main training script (UNet v2, DDP, curriculum rollout
 wrf_vit_dataset.py      # PyTorch Dataset — NPZ shards, train/test split, augmentation
 build_vit_dataset.py    # Build NPZ shard datasets from WRF NetCDF/HDF5 files
 rollout_unet_mask.py    # Autoregressive rollout evaluation
+danger_rating.py        # Human danger rating system (post-processing layer)
+smoke_viz.py            # Smoke / PM2.5 auxiliary channel visualisation
 viz_unet_pred_gif.py    # Animated rollout GIFs
 viz_predictions.py      # Side-by-side prediction visualizations
 viz_gif_overlay.py      # Fire perimeter overlay on WRF domain
@@ -119,10 +121,53 @@ python viz_unet_pred_gif.py
 
 ---
 
+## Human Danger Rating
+
+`danger_rating.py` is a post-processing module that overlays fire spread predictions with human impact layers to produce a per-cell danger score.
+
+**Layers (weighted composite):**
+| Layer | Source | Weight |
+|-------|--------|--------|
+| Population density | WRF NLCD land-use proxy (or external GPW/Census raster) | 50% |
+| Road inaccessibility | LU proxy / OSM via osmnx / precomputed raster | 30% |
+| Terrain escape risk | Slope from WRF `HGT` elevation field | 20% |
+
+**Formula:**
+```
+danger[i,j] = fire_prob[i,j] × (w_pop·pop + w_road·road_inacc + w_terrain·terrain_risk)
+```
+
+**Usage:**
+```bash
+# Single step
+python danger_rating.py \
+    --fire_prob unet_rollout_step3.npy \
+    --wrf_file  sandbox_wrfout.nc \
+    --out_dir   danger_output/
+
+# Multi-step animated GIF
+python danger_rating.py \
+    --fire_prob_dir rollout_output/ \
+    --wrf_file sandbox_wrfout.nc \
+    --make_gif
+
+# With external population raster (GPW or Census block-group GeoTIFF)
+python danger_rating.py --fire_prob step3.npy --pop_raster gpw_v4_pop_density.tif
+
+# With live OSM road download
+python danger_rating.py --fire_prob step3.npy --use_osmnx
+```
+
+**Outputs** (in `--out_dir`):
+- `danger_score.npy` — raw (H, W) float32 score
+- `danger_map.png` — 4-panel: fire prob / danger score / population / road access
+- `danger_summary.json` — high-danger cell count, bbox, mean score in fire zone
+- `danger_animation.gif` — multi-step evolution (with `--make_gif`)
+
 ## Roadmap
 
-- **Human danger rating system** — post-processing layer combining fire perimeter output with population density (Census), road networks (OpenStreetMap), and terrain escape routes (USGS 3DEP) (~1-2 weeks)
-- **Smoke / PM2.5 prediction** — FCCS fuel data as additional input channel, new output head for air quality forecasting (~3-4 weeks)
+- **[done] Human danger rating system** — `danger_rating.py`
+- **[done] Smoke / PM2.5 infrastructure** — fuel channel + PM2.5 proxy target in dataset builder; `SMOKE_W` weighted Huber loss; auxiliary regression metrics in eval; `smoke_viz.py` for visualisation. Rebuild shards with `VIT_INCLUDE_FUEL_FRAC=1 VIT_INCLUDE_PM25_PROXY=1` to activate. Swap proxy target for real WRF-Chem PM2.5 when available.
 - **Real fire validation** — run WRF-SFIRE on historical CA/OR fires and compare predicted vs. observed perimeter progression
 - **Expanded training data** — 39 → 150+ simulations with varied terrain, wind, and fuel moisture
 

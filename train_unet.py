@@ -154,6 +154,11 @@ SPLIT_SEED = _env("SPLIT_SEED",            "0",    int)   # separate seed for re
 KFOLD_K    = _env("KFOLD_K",              "0",    int)   # >1 enables k-fold CV
 KFOLD_FOLD = _env("KFOLD_FOLD",           "0",    int)   # which fold is the test fold (0-indexed)
 
+# Smoke / auxiliary regression loss weight.
+# Y[:,1:] channels (ROS, FLAME_LENGTH, and optionally PM2.5 proxy) are trained
+# with Huber loss scaled by SMOKE_W.  Set to 0.0 to disable entirely.
+SMOKE_W = _env("SMOKE_W", "0.10", float)
+
 # Output sub-dirs  (created at runtime on rank-0)
 VIZ_DIR = os.path.join(OUT_ROOT, "eval_viz")
 GIF_DIR = os.path.join(OUT_ROOT, "eval_gifs")
@@ -737,9 +742,16 @@ def train_one_epoch(model, ds, device, optimizer, scaler, pw_value,
                 pred_other = pred[:, 1:, :, :]
 
                 loss_fire = combined_fire_loss(fire_logits, fire_mask, pw)
-                loss_other = (F.mse_loss(pred_other, Y[:, 1:, :, :])
-                              if pred_other.numel() > 0
-                              else fire_logits.new_tensor(0.0))
+                # Auxiliary regression loss on ROS / FLAME_LENGTH / PM2.5 proxy channels.
+                # Huber loss is more robust than MSE when targets contain extreme values
+                # (e.g. flame length spikes near the fire front).
+                if pred_other.numel() > 0 and SMOKE_W > 0.0:
+                    loss_other = SMOKE_W * F.huber_loss(
+                        pred_other, Y[:, 1:pred_other.shape[1]+1, :, :],
+                        delta=0.5,
+                    )
+                else:
+                    loss_other = fire_logits.new_tensor(0.0)
 
                 # Deep supervision
                 loss_ds = fire_logits.new_tensor(0.0)
@@ -863,16 +875,28 @@ def evaluate_model(model, ds, device, fire_thr, save_thr_override=None):
     mpd = {t: [] for t in pthrs}
     hd = {t: [] for t in pthrs}
     maes = []
+    # Auxiliary channel metrics (ROS, FLAME_LENGTH, PM2.5 proxy, …)
+    aux_maes: List[List[float]] = []   # aux_maes[ch_idx][sample_idx]
 
     with torch.no_grad():
         for i in range(len(ds)):
             X, Y = ds[i]
             xf = X[-1].numpy()
             yb = Y[0].numpy() > fire_thr
-            _, pf_prob = predict_single(model, X, device)
+            pred_raw, pf_prob = predict_single(model, X, device)
             maes.append(float(np.abs(pf_prob - yb.astype(np.float32)).mean()))
             xf_fire = xf > fire_thr
             true_spread = yb & ~xf_fire
+
+            # Auxiliary regression metrics (channels 1…F-1)
+            n_aux = pred_raw.shape[0] - 1
+            if n_aux > 0 and Y.shape[0] > 1:
+                while len(aux_maes) < n_aux:
+                    aux_maes.append([])
+                for ch in range(n_aux):
+                    pred_ch = pred_raw[ch + 1].numpy()
+                    true_ch = Y[ch + 1].numpy()
+                    aux_maes[ch].append(float(np.abs(pred_ch - true_ch).mean()))
 
             for t in pthrs:
                 pb = pf_prob > t
@@ -896,6 +920,13 @@ def evaluate_model(model, ds, device, fire_thr, save_thr_override=None):
     save_t = float(save_thr_override) if str(
         save_thr_override).strip() else float(best_t)
 
+    # Summarise auxiliary metrics; last aux channel is treated as PM2.5 proxy
+    aux_labels = ["ros_mae", "flame_len_mae", "pm25_mae"]
+    aux_results = {}
+    for ch, ch_maes in enumerate(aux_maes):
+        label = aux_labels[ch] if ch < len(aux_labels) else f"aux{ch}_mae"
+        aux_results[label] = float(np.mean(ch_maes)) if ch_maes else np.nan
+
     return {
         "prob_mae_mean":    float(np.mean(maes)) if maes else np.nan,
         "best_iou_mean":    float(np.mean(ious[best_t])) if ious[best_t] else np.nan,
@@ -905,6 +936,7 @@ def evaluate_model(model, ds, device, fire_thr, save_thr_override=None):
         "mpd_at_best":      float(np.mean(mpd[best_t])) if mpd[best_t] else np.nan,
         "save_thr":         save_t,
         "ious_by_thr":      {t: float(np.mean(v)) if v else np.nan for t, v in ious.items()},
+        **aux_results,
     }
 
 

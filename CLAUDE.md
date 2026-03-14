@@ -24,12 +24,21 @@ Wildfire spread forecasting using a UNet model trained on WRF-SFIRE (Weather Res
   - Shards: `vit_dataset_evans_tplus1/shards/` — **334 shards**, X=(9,99,99), Y=(2,99,99), 0 errors
   - Built with: `PNW_RAW_DIR=.../testing-NAM218_evans_canyon VIT_DOMAIN=d03 VIT_FIRE_VARS="FIRE_AREA,ROS" PNW_OUT_DIR=vit_dataset_evans_tplus1 python build_pnw_dataset.py`
   - Note: `FLAME_LENGTH` not present in these outputs — use `VIT_FIRE_VARS=FIRE_AREA,ROS`
-- **PNW sims** (`pnw_sfire_raw/`, 111 sims 2015-2023): **all zero fire** — WRF-SFIRE ignition config issue in the pipeline, not a data builder issue
+- **Real fire corpus** (`real_fire_raw/`, 18 symlinked runs): Bootleg, Caldor, CRAM, Palisades, Smokehouse Creek
+  - All on scratch: `/scratch/wdt/sfire/new_wrfxpy/wrfxpy/wksp/` and `/scratch/wdt/sfire/robert/...`
+  - d03 at 15-min intervals, FIRE_AREA confirmed, FLAME_LENGTH absent → `VIT_FIRE_VARS=FIRE_AREA,ROS`
+  - Build: `sbatch build_real_fire.slurm` → output: `vit_dataset_real_fire_tplus1/shards/` (~5000 shards est.)
+- **PNW sims** (`pnw_sfire_raw/`, 111 sims 2015-2023): **all zero fire**
+  - **Root cause**: `fire_ignition_radius1 = 50m` < fire grid cell size = `dx/sr_x = 500/5 = 100m`
+  - **Fix**: in `pnw_sfire_dataset` templates, change `fire_ignition_radius1` from `50` to `≥150` (m)
+  - Path: `/scratch/wdt/pnw_sfire_dataset/templates/wrf_base/namelist.input`, line: `fire_ignition_radius1 = 50`
 
 ## Environment & Compute
 - Python venv: `~/venvs/wdt_ml/bin/activate`
 - Cluster: SLURM with GPU partition (`--partition=normal`, `--gres=gpu:1`)
 - SLURM scripts: `train_unet_gpu.slurm`, `train_unet_acc.slurm`, `train_unet_vis.slurm`
+  - `eval_evans.slurm` — eval sandbox model on Evans Canyon real fire (job 81642)
+  - `build_real_fire.slurm` — build NPZ shards from all 18 real fire runs (job 81644)
 - Run with: `sbatch train_unet_gpu.slurm` or `torchrun --nproc_per_node=N train_unet.py`
 
 ## Model Checkpoints

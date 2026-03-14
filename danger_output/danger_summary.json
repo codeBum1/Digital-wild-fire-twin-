@@ -1,0 +1,15 @@
+{
+  "n_fire_cells": 949,
+  "n_high_danger_cells": 66,
+  "frac_high_danger": 0.006734006734006734,
+  "max_danger": 1.0,
+  "mean_danger_in_fire": 0.3640282154083252,
+  "high_danger_bbox": {
+    "lat_min": 34.02745056152344,
+    "lat_max": 34.144588470458984,
+    "lon_min": -118.6295166015625,
+    "lon_max": -118.48809814453125
+  },
+  "danger_threshold": 0.6,
+  "fire_threshold": 0.3
+}

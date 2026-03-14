@@ -53,6 +53,19 @@ class BuildConfig:
     zarr_chunk_n: int = 16
     pair_k: int = 1  # how many timesteps ahead to pair (1 = consecutive)
 
+    # ── Smoke / fuel extensions ───────────────────────────────────────────────
+    # When True, appends FUEL_FRAC (fuel remaining at time t) as the last X channel.
+    # Provides the model with how much combustible material is available to burn.
+    include_fuel_frac: bool = False
+
+    # When True, appends a physics-proxy PM2.5 field as the last Y channel.
+    # Computed from FIRE_AREA × FUEL_FRAC_BURNT at t+K, dispersed by local wind.
+    # This is a *surrogate* target — replace with WRF-Chem output when available.
+    include_pm25_proxy: bool = False
+
+    # Assumed hours per WRF output timestep (used for Gaussian dispersion width).
+    pm25_dt_h: float = 1.0
+
 DEFAULT_CONFIG = BuildConfig(
     vars_2d=["T2", "Q2", "PSFC", "U10", "V10", "HGT"],
     vars_3d=["T", "QVAPOR"],
@@ -64,6 +77,9 @@ DEFAULT_CONFIG = BuildConfig(
     read_engine="netcdf4",
     assume_time_len_1=True,
     zarr_chunk_n=16,
+    include_fuel_frac=False,
+    include_pm25_proxy=False,
+    pm25_dt_h=1.0,
 )
 
 
@@ -157,6 +173,60 @@ def downsample_fire_to_atm_grid(ds: xr.Dataset, fire_da: xr.DataArray) -> xr.Dat
         name=f"{fire_da.name}_99max",
     )
 
+def compute_pm25_proxy(
+    fire_area:       np.ndarray,  # (H, W) downsampled FIRE_AREA at t+K, range [0,1]
+    fuel_frac_burnt: np.ndarray,  # (H, W) downsampled FUEL_FRAC_BURNT at t+K, range [0,1]
+    u10:             np.ndarray,  # (H, W) 10-m zonal wind at t+K (m/s)
+    v10:             np.ndarray,  # (H, W) 10-m meridional wind at t+K (m/s)
+    dx_km:           float = 1.0,
+    dt_h:            float = 1.0,
+) -> np.ndarray:
+    """
+    Physics-proxy PM2.5 surface concentration on the WRF 99×99 grid.
+
+    Approach
+    --------
+    1. Source term: cells actively burning emit smoke proportional to
+       fire coverage × fuel consumed.  emission = fire_area × fuel_frac_burnt
+    2. Dispersion: apply an isotropic Gaussian blur whose width is set by the
+       mean wind speed × time interval (rough mixing-length analogy).
+    3. Normalise to [0, 1] so the model learns relative concentration.
+
+    This is a *surrogate* target — it captures the qualitative spatial
+    structure of smoke exposure near the fire front.  Replace the Y[:,−1]
+    channel with WRF-Chem PM2.5 output when ground-truth data becomes
+    available; the model architecture requires no changes.
+
+    Returns
+    -------
+    pm25 : (H, W) float32 in [0, 1]
+    """
+    try:
+        from scipy.ndimage import gaussian_filter
+    except ImportError:
+        # If scipy unavailable fall back to plain emission map
+        emission = (fire_area * fuel_frac_burnt).astype(np.float32)
+        if emission.max() > 0:
+            emission /= emission.max()
+        return emission
+
+    # Source term: emission ∝ area burned × fuel consumed
+    emission = fire_area * fuel_frac_burnt  # (H, W), range [0,1]
+
+    # Dispersion width in grid cells:  σ = (wind_speed × dt) / dx
+    mean_wind = float(np.sqrt(np.mean(u10**2 + v10**2)))  # m/s, domain average
+    sigma_m   = mean_wind * dt_h * 3600.0                  # metres dispersion
+    sigma_cells = np.clip(sigma_m / (dx_km * 1000.0), 0.3, 8.0)
+
+    pm25 = gaussian_filter(emission.astype(np.float32), sigma=sigma_cells)
+
+    # Normalise
+    if pm25.max() > 0:
+        pm25 = pm25 / pm25.max()
+
+    return pm25.astype(np.float32)
+
+
 def load_one_file(path: str, engine: str) -> xr.Dataset:
     """
     Load a WRF wrfout file.
@@ -242,6 +312,15 @@ def extract_sample_tensors(
     else:
         X_channels.append(fire_in_da.values[0].astype(np.float32))
 
+    # Optional: fuel fraction at time t
+    if cfg.include_fuel_frac and "FUEL_FRAC" in ds:
+        fuel_da = ds["FUEL_FRAC"]
+        if cfg.downsample_fire_to_atm:
+            fuel_99 = downsample_fire_to_atm_grid(ds, fuel_da)
+            X_channels.append(fuel_99.values[0].astype(np.float32))
+        else:
+            X_channels.append(fuel_da.values[0].astype(np.float32))
+
     X = np.stack(X_channels, axis=0)  # (C,H,W)
 
     # ---- Build Y channels ----
@@ -255,6 +334,22 @@ def extract_sample_tensors(
         else:
             # keep native fire grid
             Y_channels.append(fire_da.values[0].astype(np.float32))
+
+    # Optional: PM2.5 proxy as last Y channel (uses Y_channels[0] = FIRE_AREA)
+    if cfg.include_pm25_proxy:
+        fire_area_arr = Y_channels[0]
+        fuel_burnt = np.zeros_like(fire_area_arr)
+        if "FUEL_FRAC_BURNT" in ds:
+            fb_da = ds["FUEL_FRAC_BURNT"]
+            if cfg.downsample_fire_to_atm:
+                fuel_burnt = downsample_fire_to_atm_grid(ds, fb_da).values[0].astype(np.float32)
+            else:
+                fuel_burnt = fb_da.values[0].astype(np.float32)
+        u10 = ds["U10"].values[0].astype(np.float32) if "U10" in ds else np.zeros_like(fire_area_arr)
+        v10 = ds["V10"].values[0].astype(np.float32) if "V10" in ds else np.zeros_like(fire_area_arr)
+        pm25 = compute_pm25_proxy(fire_area_arr, fuel_burnt, u10, v10,
+                                  dx_km=1.0, dt_h=cfg.pm25_dt_h)
+        Y_channels.append(pm25)
 
     Y = np.stack(Y_channels, axis=0)  # (F,H,W) if downsampled else (F,500,500)
 
@@ -300,6 +395,15 @@ def extract_X_only(ds: xr.Dataset, cfg: BuildConfig) -> np.ndarray:
     else:
         X_channels.append(fire_in_da.values[0].astype(np.float32))
 
+    # Optional: fuel fraction at time t (how much fuel remains available to burn)
+    if cfg.include_fuel_frac and "FUEL_FRAC" in ds:
+        fuel_da = ds["FUEL_FRAC"]
+        if cfg.downsample_fire_to_atm:
+            fuel_99 = downsample_fire_to_atm_grid(ds, fuel_da)
+            X_channels.append(fuel_99.values[0].astype(np.float32))
+        else:
+            X_channels.append(fuel_da.values[0].astype(np.float32))
+
     X = np.stack(X_channels, axis=0)
     return X
 
@@ -316,6 +420,29 @@ def extract_Y_only(ds: xr.Dataset, cfg: BuildConfig) -> np.ndarray:
             Y_channels.append(fire_99.values[0].astype(np.float32))
         else:
             Y_channels.append(fire_da.values[0].astype(np.float32))
+
+    # Optional: PM2.5 proxy as the last Y channel
+    if cfg.include_pm25_proxy:
+        # Source: fire area × fuel consumed at t+K, dispersed by wind at t+K
+        fire_area = Y_channels[0]  # FIRE_AREA (first fire_var, already downsampled)
+
+        fuel_burnt = np.zeros_like(fire_area)
+        if "FUEL_FRAC_BURNT" in ds:
+            fb_da = ds["FUEL_FRAC_BURNT"]
+            if cfg.downsample_fire_to_atm:
+                fuel_burnt = downsample_fire_to_atm_grid(ds, fb_da).values[0].astype(np.float32)
+            else:
+                fuel_burnt = fb_da.values[0].astype(np.float32)
+
+        # Wind at t+K for dispersion width
+        u10 = ds["U10"].values[0].astype(np.float32) if "U10" in ds else np.zeros_like(fire_area)
+        v10 = ds["V10"].values[0].astype(np.float32) if "V10" in ds else np.zeros_like(fire_area)
+
+        pm25 = compute_pm25_proxy(
+            fire_area, fuel_burnt, u10, v10,
+            dx_km=1.0, dt_h=cfg.pm25_dt_h,
+        )
+        Y_channels.append(pm25)
 
     Y = np.stack(Y_channels, axis=0)
     return Y
@@ -530,6 +657,17 @@ if __name__ == "__main__":
         cfg.read_engine = eng
 
     cfg.pair_k = int(os.environ.get("VIT_PAIR_K", "1"))
+
+    # Smoke / fuel extensions
+    if os.environ.get("VIT_INCLUDE_FUEL_FRAC", "0") == "1":
+        cfg.include_fuel_frac = True
+        print("VIT_INCLUDE_FUEL_FRAC=1 → adding FUEL_FRAC as extra X channel")
+    if os.environ.get("VIT_INCLUDE_PM25_PROXY", "0") == "1":
+        cfg.include_pm25_proxy = True
+        print("VIT_INCLUDE_PM25_PROXY=1 → adding PM2.5 proxy as extra Y channel")
+    pm25_dt = os.environ.get("VIT_PM25_DT_H")
+    if pm25_dt:
+        cfg.pm25_dt_h = float(pm25_dt)
 
     build_dataset(files, cfg)
 
