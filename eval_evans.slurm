@@ -16,6 +16,7 @@ cd ~/wrfout_sandbox
 
 export SHARDS_DIR=/home/abazan/wrfout_sandbox/vit_dataset_evans_tplus1/shards
 export LOAD_CKPT_PATH=/home/abazan/wrfout_sandbox/unet_ms_gpu_best.pt
+export OUT_C=3
 
 # Eval-only: skip training, run full evaluation + rollout visualization
 export EVAL_ONLY=1

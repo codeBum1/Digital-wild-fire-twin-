@@ -34,7 +34,7 @@ The model runs a 6-step autoregressive rollout in under a second on a single GPU
 
 ## Results
 
-Training on WRF-SFIRE simulation data (31 train / 8 test samples, 400 epochs, 4× L40S GPUs):
+**Simulation dataset** (31 train / 8 test samples, 400 epochs, 4× L40S GPUs):
 
 | Metric | Value |
 |--------|-------|
@@ -46,6 +46,15 @@ Training on WRF-SFIRE simulation data (31 train / 8 test samples, 400 epochs, 4�
 | Composite score | **0.911** |
 
 > Numbers above are on the held-out test set — samples the model never trained on.
+
+**Real-fire transfer (Evans Canyon 2020, WRF-SFIRE d03, 15-min outputs):**
+
+| Model | Fire IoU | Notes |
+|-------|----------|-------|
+| Sandbox (zero-shot) | 0.0715 | No real-fire training data |
+| Fine-tuned on real-fire corpus | **0.2112** | +196% vs zero-shot |
+
+> Evans Canyon is a real 2020 WA Cascades wildfire with 334 evaluation shards. The fine-tuned model was trained on 19 WRF-SFIRE runs across California, Oregon, and Washington fires.
 
 ---
 
@@ -64,18 +73,32 @@ Training on WRF-SFIRE simulation data (31 train / 8 test samples, 400 epochs, 4�
 ## Repo Structure
 
 ```
-train_unet.py           # Main training script (UNet v2, DDP, curriculum rollout)
-wrf_vit_dataset.py      # PyTorch Dataset — NPZ shards, train/test split, augmentation
-build_vit_dataset.py    # Build NPZ shard datasets from WRF NetCDF/HDF5 files
-rollout_unet_mask.py    # Autoregressive rollout evaluation
-danger_rating.py        # Human danger rating system (post-processing layer)
-smoke_viz.py            # Smoke / PM2.5 auxiliary channel visualisation
-viz_unet_pred_gif.py    # Animated rollout GIFs
-viz_predictions.py      # Side-by-side prediction visualizations
-viz_gif_overlay.py      # Fire perimeter overlay on WRF domain
-converters/h5_to_nc.py  # Convert HDF5 wrfout files to NetCDF
-train_unet_l40s.slurm   # SLURM job script (L40S, 4-GPU)
-train_unet_gpu.slurm    # SLURM job script (A30, single GPU)
+train_unet.py              # Main training script (UNet v2, DDP, curriculum rollout)
+wrf_vit_dataset.py         # PyTorch Dataset — NPZ shards, train/test split, augmentation
+build_vit_dataset.py       # Build NPZ shard datasets from WRF NetCDF/HDF5 files
+build_pnw_dataset.py       # Multi-sim dataset builder for real WRF-SFIRE runs
+rollout_unet_mask.py       # Autoregressive rollout evaluation
+danger_rating.py           # Human danger rating system (post-processing layer)
+smoke_viz.py               # Smoke / PM2.5 auxiliary channel visualisation
+viz_unet_pred_gif.py       # Animated rollout GIFs
+viz_predictions.py         # Side-by-side prediction visualizations
+viz_gif_overlay.py         # Fire perimeter overlay on WRF domain
+converters/h5_to_nc.py     # Convert HDF5 wrfout files to NetCDF
+
+# SLURM job scripts
+train_unet_gpu.slurm       # Original sandbox training (A30, single GPU)
+train_real_fire.slurm      # Fine-tune on real-fire corpus
+train_mixed.slurm          # Mixed model: real-fire + Evans Canyon (150 epochs)
+train_smoke.slurm          # Smoke model with PM2.5 auxiliary loss
+eval_evans.slurm           # Eval on Evans Canyon real fire
+eval_evans_retrained.slurm # Eval retrained model on Evans Canyon
+eval_evans_mixed.slurm     # Eval mixed model on Evans Canyon
+eval_evans_smoke.slurm     # Eval smoke model on Evans Canyon smoke shards
+build_real_fire.slurm      # Build NPZ shards from 19 real-fire runs
+build_pnw_shards.slurm     # Build NPZ shards from 321 PNW runs
+build_smoke_fire.slurm     # Rebuild real-fire corpus with fuel + PM2.5 channels
+build_evans_smoke.slurm    # Rebuild Evans Canyon shards with fuel + PM2.5 channels
+collect_pnw_usable.sh      # Create symlinks to 321 usable PNW WRF-SFIRE runs
 ```
 
 ---
@@ -166,10 +189,11 @@ python danger_rating.py --fire_prob step3.npy --use_osmnx
 
 ## Roadmap
 
-- **[done] Human danger rating system** — `danger_rating.py`
+- **[done] Human danger rating system** — `danger_rating.py` integrated into eval pipeline; produces per-cell danger score + animated GIFs combining fire probability with population, road access, and terrain risk layers
 - **[done] Smoke / PM2.5 infrastructure** — fuel channel + PM2.5 proxy target in dataset builder; `SMOKE_W` weighted Huber loss; auxiliary regression metrics in eval; `smoke_viz.py` for visualisation. Rebuild shards with `VIT_INCLUDE_FUEL_FRAC=1 VIT_INCLUDE_PM25_PROXY=1` to activate. Swap proxy target for real WRF-Chem PM2.5 when available.
-- **Real fire validation** — run WRF-SFIRE on historical CA/OR fires and compare predicted vs. observed perimeter progression
-- **Expanded training data** — 39 → 150+ simulations with varied terrain, wind, and fuel moisture
+- **[done] Real fire validation** — 19 WRF-SFIRE runs (Bootleg, Caldor, CRAM, Palisades, Smokehouse Creek, Evans Canyon + others) → fine-tuned model achieves **IoU=0.2112** on Evans Canyon (up from 0.0715 zero-shot, +196%)
+- **[in progress] Mixed model + smoke model** — training on combined 7128-shard corpus with cosine restarts; smoke model with PM2.5 auxiliary channel
+- **[in progress] Expanded training data** — 321 PNW WRF-SFIRE runs staged and ready; 4 new fire configs created (Dixie 2021, McKinney 2022, Holiday Farm 2020, Flat 2023)
 
 ---
 

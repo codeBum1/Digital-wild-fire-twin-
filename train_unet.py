@@ -110,6 +110,7 @@ WEIGHT_DECAY = _env("WEIGHT_DECAY",          "1e-4", float)
 GRAD_CLIP_NORM = _env("GRAD_CLIP_NORM",        "1.0",  float)
 
 BASE_CHANNELS = _env("BASE_CHANNELS",         "64",   int)
+OUT_C_OVERRIDE = _env("OUT_C",               "0",    int)  # 0 = infer from data
 DROPOUT = _env("DROPOUT",               "0.10", float)
 DROP_PATH_RATE = _env("DROP_PATH_RATE",        "0.10", float)
 DEEP_SUPERVISION = _env("DEEP_SUPERVISION",      "1",    int)
@@ -159,6 +160,11 @@ KFOLD_FOLD = _env("KFOLD_FOLD",           "0",    int)   # which fold is the tes
 # with Huber loss scaled by SMOKE_W.  Set to 0.0 to disable entirely.
 SMOKE_W = _env("SMOKE_W", "0.10", float)
 
+# Human Danger Rating post-processing
+# Set RUN_DANGER_RATING=1 and DANGER_WRF_FILE=<path/to/wrfout> to enable.
+RUN_DANGER_RATING = _env("RUN_DANGER_RATING", "0", int)
+DANGER_WRF_FILE   = _env("DANGER_WRF_FILE",   "")
+
 # Output sub-dirs  (created at runtime on rank-0)
 VIZ_DIR = os.path.join(OUT_ROOT, "eval_viz")
 GIF_DIR = os.path.join(OUT_ROOT, "eval_gifs")
@@ -171,11 +177,12 @@ ROLL_OUT_PLOT_DIR = os.path.join(OUT_ROOT, "rollout_plots")
 SPREAD_PLOT_DIR = os.path.join(OUT_ROOT, "spread_plots")
 ARRIVAL_DIR = os.path.join(OUT_ROOT, "arrival_viz")
 PERIM_GIF_DIR = os.path.join(OUT_ROOT, "perim_overlay_gifs")
+DANGER_DIR = os.path.join(OUT_ROOT, "danger_rating")
 
 ALL_OUTPUT_DIRS = [
     VIZ_DIR, GIF_DIR, PAPER_VIZ_DIR, PROB_VIZ_DIR,
     ROLL_OUT_GIF_DIR, ROLL_OUT_PROB_GIF_DIR, CINEMATIC_DIR,
-    ROLL_OUT_PLOT_DIR, SPREAD_PLOT_DIR, ARRIVAL_DIR, PERIM_GIF_DIR,
+    ROLL_OUT_PLOT_DIR, SPREAD_PLOT_DIR, ARRIVAL_DIR, PERIM_GIF_DIR, DANGER_DIR,
 ]
 
 
@@ -894,6 +901,8 @@ def evaluate_model(model, ds, device, fire_thr, save_thr_override=None):
                 while len(aux_maes) < n_aux:
                     aux_maes.append([])
                 for ch in range(n_aux):
+                    if ch + 1 >= Y.shape[0]:
+                        break
                     pred_ch = pred_raw[ch + 1].numpy()
                     true_ch = Y[ch + 1].numpy()
                     aux_maes[ch].append(float(np.abs(pred_ch - true_ch).mean()))
@@ -1517,6 +1526,76 @@ def save_rollout_visuals(model, ds, device, save_thr):
                                  title_prefix=f"Mean rollout thr={save_thr}")
 
 
+def save_danger_visuals(model, ds, device, save_thr):
+    """
+    Post-process rollout fire-probability arrays through the Human Danger Rating
+    system.  Requires RUN_DANGER_RATING=1 and a valid DANGER_WRF_FILE.
+
+    For each of the first ROLL_OUT_N_SAMPLES test samples the autoregressive
+    rollout is replayed and every step's fire-probability map is passed to
+    danger_rating.run_danger_rating(), producing per-step danger maps, JSON
+    summaries, and (if ≥2 steps) an animated GIF.
+    """
+    if not RUN_DANGER_RATING:
+        return
+
+    try:
+        import danger_rating as dr
+    except ImportError:
+        print("  [danger] danger_rating module not found – skipping")
+        return
+
+    if not DANGER_WRF_FILE or not Path(DANGER_WRF_FILE).exists():
+        print(f"  [danger] DANGER_WRF_FILE not found: '{DANGER_WRF_FILE}' – skipping")
+        return
+
+    print(f"\n── Danger Rating  (wrf={DANGER_WRF_FILE}) ──")
+    try:
+        wrf_fields = dr.load_wrf_fields(DANGER_WRF_FILE)
+        H_wrf, W_wrf = wrf_fields["xlat"].shape
+        print(f"  WRF grid: {H_wrf}×{W_wrf}  "
+              f"lat=[{wrf_fields['xlat'].min():.3f}, {wrf_fields['xlat'].max():.3f}]  "
+              f"lon=[{wrf_fields['xlong'].min():.3f}, {wrf_fields['xlong'].max():.3f}]")
+    except Exception as e:
+        print(f"  [danger] failed to load WRF fields: {e} – skipping")
+        return
+
+    save_thr = parse_vis_threshold(save_thr)
+    cfg = dr.DangerConfig(wrf_file=DANGER_WRF_FILE, out_dir=DANGER_DIR)
+    n = min(ROLL_OUT_N_SAMPLES, len(ds))
+
+    with torch.no_grad():
+        for i in range(n):
+            _, probs, _, _ = run_autoregressive_rollout(
+                model, ds, i, ROLL_OUT_STEPS, save_thr, device)
+
+            sample_dir = Path(with_run_tag(os.path.join(DANGER_DIR, f"sample_{i:03d}")))
+            frame_paths = []
+            for step_idx, fire_prob in enumerate(probs, start=1):
+                # Resize fire_prob to WRF grid if shapes differ
+                if fire_prob.shape != (H_wrf, W_wrf):
+                    from scipy.ndimage import zoom
+                    zy = H_wrf / fire_prob.shape[0]
+                    zx = W_wrf / fire_prob.shape[1]
+                    fire_prob = zoom(fire_prob, (zy, zx), order=1).astype(np.float32)
+                    fire_prob = np.clip(fire_prob, 0.0, 1.0)
+
+                result = dr.run_danger_rating(
+                    fire_prob, wrf_fields, cfg,
+                    step=step_idx, out_dir=sample_dir)
+                frame_paths.append(result["viz_path"])
+
+            if len(frame_paths) > 1:
+                dr.make_danger_gif(
+                    frame_paths,
+                    str(sample_dir / "danger_animation.gif"),
+                    fps=2,
+                )
+            print(f"  [danger] saved sample {i}  ({len(frame_paths)} steps)")
+
+    print(f"Danger rating outputs → {DANGER_DIR}/")
+
+
 # ─────────────────────────────────────────────────────────────
 #  Main
 # ─────────────────────────────────────────────────────────────
@@ -1573,7 +1652,8 @@ def main():
         print(f"Split saved to {split_path}")
 
     X0, Y0 = ds[0]
-    in_c, out_c = X0.shape[0], Y0.shape[0]
+    in_c = X0.shape[0]
+    out_c = OUT_C_OVERRIDE if OUT_C_OVERRIDE > 0 else Y0.shape[0]
 
     if main_proc:
         print(f"in_c={in_c}  out_c={out_c}  base={BASE_CHANNELS}")
@@ -1656,6 +1736,7 @@ def main():
             print(f"\nGenerating visualisations (thr={final_vis_thr}) ...")
             save_all_visuals(raw, test_ds, device, final_vis_thr)
             save_rollout_visuals(raw, test_ds, device, final_vis_thr)
+            save_danger_visuals(raw, test_ds, device, final_vis_thr)
             print("Done.")
             if WANDB_AVAILABLE and WANDB_PROJECT:
                 wandb.finish()
@@ -1763,6 +1844,7 @@ def main():
         print(f"\nGenerating visualisations (thr={final_vis_thr}) ...")
         save_all_visuals(raw, test_ds, device, final_vis_thr)
         save_rollout_visuals(raw, test_ds, device, final_vis_thr)
+        save_danger_visuals(raw, test_ds, device, final_vis_thr)
         print("Done.")
 
         if WANDB_AVAILABLE and WANDB_PROJECT:
