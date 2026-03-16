@@ -17,7 +17,8 @@ export LOAD_CKPT_PATH=/home/abazan/wrfout_sandbox/unet_smoke_best.pt
 export EVAL_ONLY=1
 
 export FIRE_THR=0.1
-export VIS_THR=0.6
+export VIS_THR=0.40
+export FIRE_CH_IDX=-2   # FUEL_FRAC is last X channel (in_c=10); FIRE_AREA is at -2
 export ROLL_OUT_STEPS=5
 export ROLL_OUT_N_SAMPLES=3
 export BATCH_SIZE=8

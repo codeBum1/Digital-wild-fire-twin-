@@ -144,6 +144,9 @@ ROLL_OUT_STEPS = _env("ROLL_OUT_STEPS",        "6",    int)
 ROLL_OUT_N_SAMPLES = _env("ROLL_OUT_N_SAMPLES",    "4",    int)
 PB_THR_ENV = _env("PB_THR",                "")
 VIS_THR_ENV = _env("VIS_THR",               "")
+# Index of the FIRE_AREA channel in X.  Default -1 (last channel, standard 9-ch model).
+# Set to -2 when FUEL_FRAC is appended as the final X channel (smoke model, in_c=10).
+FIRE_CH_IDX = _env("FIRE_CH_IDX",           "-1",   int)
 EVAL_ONLY = _env("EVAL_ONLY",             "0",    int)
 LOAD_CKPT_PATH = _env("LOAD_CKPT_PATH",       "")
 EVAL_NORMALIZE_PER_SAMPLE = _env("EVAL_NORMALIZE_PER_SAMPLE", "1", int)
@@ -1069,7 +1072,10 @@ def make_pred_overlay_rgb(base_fire, pred_mask):
 def run_autoregressive_rollout(model, ds, start_idx, rollout_steps, thr, device):
     X0, _ = ds[start_idx]
     state = X0.clone().to(device)
-    init_f = state[-1].cpu().numpy()
+    # Resolve FIRE_CH_IDX to a non-negative index so slice arithmetic is unambiguous.
+    n_ch = state.shape[0]
+    fire_ch = FIRE_CH_IDX if FIRE_CH_IDX >= 0 else n_ch + FIRE_CH_IDX
+    init_f = state[fire_ch].cpu().numpy()
     pred_probs, pred_masks, true_masks = [], [], []
 
     for step in range(1, rollout_steps + 1):
@@ -1096,8 +1102,8 @@ def run_autoregressive_rollout(model, ds, start_idx, rollout_steps, thr, device)
                 nxt_state = state.clone()
             nxt_fire = torch.from_numpy(pf).to(device).unsqueeze(0)
             if KEEP_BURNING:
-                nxt_fire = torch.maximum(nxt_fire, state[-1:])
-            nxt_state[-1:] = nxt_fire
+                nxt_fire = torch.maximum(nxt_fire, state[fire_ch:fire_ch + 1])
+            nxt_state[fire_ch:fire_ch + 1] = nxt_fire
             state = nxt_state
 
     return init_f, pred_probs, pred_masks, true_masks
