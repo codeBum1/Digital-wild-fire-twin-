@@ -56,6 +56,19 @@ The model runs a 6-step autoregressive rollout in under a second on a single GPU
 
 > Evans Canyon is a real 2020 WA Cascades wildfire with 334 evaluation shards. The fine-tuned model was trained on 19 WRF-SFIRE runs across California, Oregon, and Washington fires.
 
+**NIFC ground-truth validation (Evans Canyon, 2020-09-02 20:00 UTC):**
+
+Perimeter downloaded from NIFC WFIGS API and rasterized onto the 99×99 WRF grid. Compared at the same timestamp across three layers:
+
+| | IoU vs NIFC | Fire cells | Notes |
+|--|--|--|--|
+| WRF-SFIRE simulation | 0.019 | 46 / 638 | Sim captures ~7% of actual burned area |
+| Model predicted | 0.062 | 7,686 / 638 | High recall (0.77), low precision (0.06) |
+
+**Key finding:** WRF-SFIRE significantly under-predicts the real fire extent at this timestamp (IoU=0.019) — the simulation captures ~7% of the NIFC-observed burned area. The model learned to replicate WRF-SFIRE behavior well (IoU=0.2112 vs simulator), but inherited the simulator's systematic under-prediction bias. The model then over-compensates with high recall but poor spatial precision.
+
+This quantifies the **simulation-to-reality gap** as the primary bottleneck. Improving real-world accuracy requires either better WRF-SFIRE fidelity (fuel moisture, spotting, crown fire) or training directly on observed fire progression data.
+
 ---
 
 ## Inputs / Outputs
@@ -79,6 +92,7 @@ build_vit_dataset.py       # Build NPZ shard datasets from WRF NetCDF/HDF5 files
 build_pnw_dataset.py       # Multi-sim dataset builder for real WRF-SFIRE runs
 rollout_unet_mask.py       # Autoregressive rollout evaluation
 danger_rating.py           # Human danger rating system (post-processing layer)
+nifc_eval.py               # NIFC ground-truth eval — downloads perimeter, rasterizes, 3-way compare
 smoke_viz.py               # Smoke / PM2.5 auxiliary channel visualisation
 viz_unet_pred_gif.py       # Animated rollout GIFs
 viz_predictions.py         # Side-by-side prediction visualizations
@@ -192,6 +206,7 @@ python danger_rating.py --fire_prob step3.npy --use_osmnx
 - **[done] Human danger rating system** — `danger_rating.py` integrated into eval pipeline; produces per-cell danger score + animated GIFs combining fire probability with population, road access, and terrain risk layers
 - **[done] Smoke / PM2.5 infrastructure** — fuel channel + PM2.5 proxy target in dataset builder; `SMOKE_W` weighted Huber loss; auxiliary regression metrics in eval; `smoke_viz.py` for visualisation. Rebuild shards with `VIT_INCLUDE_FUEL_FRAC=1 VIT_INCLUDE_PM25_PROXY=1` to activate. Swap proxy target for real WRF-Chem PM2.5 when available.
 - **[done] Real fire validation** — 19 WRF-SFIRE runs (Bootleg, Caldor, CRAM, Palisades, Smokehouse Creek, Evans Canyon + others) → fine-tuned model achieves **IoU=0.2112** on Evans Canyon (up from 0.0715 zero-shot, +196%)
+- **[done] NIFC ground-truth validation** — `nifc_eval.py` downloads NIFC perimeter shapefiles, rasterizes onto WRF grid, and runs three-way comparison (WRF sim vs NIFC, model vs NIFC, model vs WRF). Quantified simulation-to-reality gap as primary accuracy bottleneck.
 - **[in progress] Mixed model + smoke model** — training on combined 7128-shard corpus with cosine restarts; smoke model with PM2.5 auxiliary channel
 - **[in progress] Expanded training data** — 321 PNW WRF-SFIRE runs staged and ready; 4 new fire configs created (Dixie 2021, McKinney 2022, Holiday Farm 2020, Flat 2023)
 
