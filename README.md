@@ -203,12 +203,35 @@ python danger_rating.py --fire_prob step3.npy --use_osmnx
 
 ## Roadmap
 
+### Completed
 - **[done] Human danger rating system** — `danger_rating.py` integrated into eval pipeline; produces per-cell danger score + animated GIFs combining fire probability with population, road access, and terrain risk layers
-- **[done] Smoke / PM2.5 infrastructure** — fuel channel + PM2.5 proxy target in dataset builder; `SMOKE_W` weighted Huber loss; auxiliary regression metrics in eval; `smoke_viz.py` for visualisation. Rebuild shards with `VIT_INCLUDE_FUEL_FRAC=1 VIT_INCLUDE_PM25_PROXY=1` to activate. Swap proxy target for real WRF-Chem PM2.5 when available.
+- **[done] Smoke / PM2.5 infrastructure** — fuel channel + PM2.5 proxy target in dataset builder; `SMOKE_W` weighted Huber loss; auxiliary regression metrics in eval; `smoke_viz.py` for visualisation
 - **[done] Real fire validation** — 19 WRF-SFIRE runs (Bootleg, Caldor, CRAM, Palisades, Smokehouse Creek, Evans Canyon + others) → fine-tuned model achieves **IoU=0.2112** on Evans Canyon (up from 0.0715 zero-shot, +196%)
-- **[done] NIFC ground-truth validation** — `nifc_eval.py` downloads NIFC perimeter shapefiles, rasterizes onto WRF grid, and runs three-way comparison (WRF sim vs NIFC, model vs NIFC, model vs WRF). Quantified simulation-to-reality gap as primary accuracy bottleneck.
-- **[in progress] Mixed model + smoke model** — training on combined 7128-shard corpus with cosine restarts; smoke model with PM2.5 auxiliary channel
-- **[in progress] Expanded training data** — 321 PNW WRF-SFIRE runs staged and ready; 4 new fire configs created (Dixie 2021, McKinney 2022, Holiday Farm 2020, Flat 2023)
+- **[done] NIFC ground-truth validation** — `nifc_eval.py` downloads NIFC WFIGS perimeter shapefiles, rasterizes onto WRF grid, three-way comparison (WRF sim vs NIFC, model vs NIFC, model vs WRF). **Finding: WRF-SFIRE captures ~7% of actual burned area (IoU=0.019 vs NIFC) — simulation fidelity is the primary bottleneck, not model architecture.**
+
+### In Progress
+- **[in progress] Mixed model** — training on combined 7128-shard corpus (real-fire + Evans Canyon) with 150-epoch cosine restarts → `unet_mixed_best.pt`
+- **[in progress] Smoke model** — rebuilding shards with `FUEL_FRAC` + PM2.5 proxy channels, then training with `SMOKE_W=0.1` → `unet_smoke_best.pt`
+- **[in progress] Expanded simulation corpus** — 321 PNW WRF-SFIRE runs staged (`pnw_sfire_usable/`); 4 new fire configs ready (Dixie 2021, McKinney 2022, Holiday Farm 2020, Flat 2023)
+
+### Closing the Simulation-to-Reality Gap
+The NIFC evaluation revealed that WRF-SFIRE under-predicts real fire extent by ~14× at the Evans Canyon timestamp. Three parallel paths to fix this:
+
+**1. Satellite-observed training targets (highest impact)**
+Replace WRF-SFIRE `FIRE_AREA` labels with NASA FIRMS VIIRS active fire detections (375m, ~6h cadence, free via NASA EARTHDATA API). Use HRRR analysis fields as met inputs instead of WRF atmospheric outputs. This produces a training pipeline grounded entirely in observations rather than simulation output.
+- `build_firms_dataset.py` — download VIIRS detections + HRRR fields, build NPZ shards with real Y labels
+- Enables training on any fire with FIRMS coverage (2012–present, global)
+
+**2. Improve WRF-SFIRE simulation fidelity**
+The simulator misses key physical processes that drove Evans Canyon spread:
+- **Spotting** — firebrands lofted ahead of the main front; not modeled in WRF-SFIRE by default
+- **Crown fire** — transition from surface to canopy fire; requires `ifire=3` + crown fire params
+- **Fuel moisture** — real-time RAWS station data improves over climatological defaults
+- **Wind downscaling** — finer fire grid (sr_x=10 or 15 instead of 5) captures terrain channeling
+Rerunning Evans Canyon with these fixes would produce a simulation that better matches NIFC, giving the model more accurate training signal.
+
+**3. Multi-perimeter supervised training**
+Query NIFC WFIGS for fires with ≥3 daily perimeter snapshots, rasterize each snapshot as a Y label, and pair with HRRR met fields as X. Even without re-running WRF-SFIRE, this creates a small but reality-grounded training set. 10–20 fires with multi-day perimeters could meaningfully shift the model toward real fire behavior.
 
 ---
 
