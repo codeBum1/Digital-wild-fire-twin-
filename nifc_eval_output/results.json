@@ -1,0 +1,34 @@
+{
+  "fire": "Evans Canyon 2020",
+  "fire_id": "2020-WASES-000565",
+  "nifc_timestamp": "2020-09-02 20:00:00+00:00",
+  "nifc_acres": 75693.3441769722,
+  "wrf_target_file": "wrfout_d03_2020-09-02_20:00:00",
+  "best_shard": "000274.npz",
+  "shard_match_iou": 0.8163265306122449,
+  "checkpoint": "unet_ms_gpu_retrain_best.pt",
+  "wrf_vs_nifc": {
+    "iou": 0.019374068554396422,
+    "dice": 0.038011695906432746,
+    "precision": 0.2826086956521739,
+    "recall": 0.02037617554858934,
+    "pred_cells": 46,
+    "obs_cells": 638
+  },
+  "model_vs_nifc": {
+    "iou": 0.06241225271218889,
+    "dice": 0.11749159058145123,
+    "precision": 0.06362217017954723,
+    "recall": 0.7664576802507836,
+    "pred_cells": 7686,
+    "obs_cells": 638
+  },
+  "model_vs_wrf": {
+    "iou": 0.0059849076242518865,
+    "dice": 0.01189860320744956,
+    "precision": 0.0059849076242518865,
+    "recall": 1.0,
+    "pred_cells": 7686,
+    "obs_cells": 46
+  }
+}
